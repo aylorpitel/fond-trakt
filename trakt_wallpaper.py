@@ -719,6 +719,11 @@ def main_serveur(demo=False):
     theme(vus, auj, L * SUR, H * SUR, stats, annee).convert("RGB").resize((L, H), Image.LANCZOS).save(site / "mac.png")
     W, Hp = IPHONE_TAILLE
     iphone_affiche(vus, auj, W * SUR, Hp * SUR, stats, annee).convert("RGB").resize((W, Hp), Image.LANCZOS).save(site / "iphone.png")
+    # Empreinte de chaque image : les appareils ne téléchargent l'image que si elle a changé
+    import hashlib
+    for nom in ("mac", "iphone"):
+        empreinte = hashlib.sha256((site / f"{nom}.png").read_bytes()).hexdigest()
+        (site / f"{nom}.txt").write_text(empreinte + "\n")
     (site / "index.html").write_text(
         "<!doctype html><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
         "<title>Fond Trakt</title><body style='background:#000;margin:0;padding:16px;font-family:sans-serif;color:#888'>"
