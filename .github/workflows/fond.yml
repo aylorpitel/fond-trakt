@@ -22,6 +22,7 @@ jobs:
       url: ${{ steps.deploiement.outputs.page_url }}
     env:
       TZ: Europe/Paris
+      THEME: papier             # « papier », « appareil » ou « affiche »
       TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
       TRAKT_USERNAME: ${{ secrets.TRAKT_USERNAME }}
     steps:
