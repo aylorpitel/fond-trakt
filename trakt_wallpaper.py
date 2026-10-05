@@ -1149,9 +1149,12 @@ def taches_orbe(liste, nb_jours, c, t=None):
         jours.append(f["jour"])
         rayon = c * [0.17, 0.07, 0.26][k % 3]
         if t is not None:
-            phase = (k * 0.5) % 1 + (i * 0.618) % 1 * 0.15
-            rayon += c * 0.035 * math.sin(2 * math.pi * (t + phase))
-            r *= 1 + 0.07 * math.sin(2 * math.pi * (t + phase + 0.25))
+            # Chaque couleur a son propre décalage : elle avance et recule le long de la direction de sa date,
+            # et se balance d'un jour de part et d'autre (une petite boucle, sans quitter la zone de son jour).
+            phase = (i * 0.618) % 1
+            rayon += c * 0.045 * math.sin(2 * math.pi * (t + phase))
+            a += 2 * math.pi / nb_jours * math.sin(2 * math.pi * (t + phase + 0.25))
+            r *= 1 + 0.07 * math.sin(2 * math.pi * (t + phase + 0.5))
         taches.append((bool(f.get("serie")), r, c / 2 + rayon * math.cos(a), c / 2 + rayon * math.sin(a),
                        couleurs[f["titre"]]))
     return taches, n
