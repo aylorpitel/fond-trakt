@@ -25,7 +25,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 # ============ CONFIGURATION ============
 TRAKT_CLIENT_ID = "COLLE_TON_CLIENT_ID_ICI"
 TRAKT_USERNAME = "ton_pseudo_trakt"
-INCLURE_EPISODES = False   # True = les épisodes de séries comptent aussi
+INCLURE_EPISODES = True    # True = les épisodes de séries comptent aussi
 THEME = "salle"            # "salle", "pellicule" ou "affiche"
 DOSSIER = Path.home() / "trakt-wallpaper"
 VERSION_IPHONE = True      # crée aussi une image pour l'écran verrouillé, dans iCloud Drive
@@ -250,7 +250,9 @@ def preparer(annee_donnees, auj):
         jour -= timedelta(days=1)
     annee["mois"] = {
         "liste": [{"jour": datetime.fromisoformat(v["quand"]).day, "titre": v["titre"],
-                   "duree": v["duree"]} for v in du_mois],
+                   "duree": v["duree"], "serie": v.get("serie")} for v in du_mois],
+        "films": sum(1 for v in du_mois if not v.get("serie")),
+        "episodes": sum(1 for v in du_mois if v.get("serie")),
         "minutes": sum(v["duree"] for v in du_mois),
         "minutes_prec": sum(v["duree"] for v in precedent) if precedent is not None else None,
         "serie": serie,
@@ -1165,11 +1167,43 @@ def entete_papier(d, auj, x0, x1, y, s):
            hexa(GRIS_P), 2 * s, "rs")
 
 
+def compte_mois(mois):
+    """« 2 FILMS », « 2 FILMS · 5 ÉP. » ou « 5 ÉP. »."""
+    morceaux = []
+    if mois["films"] or not mois["episodes"]:
+        morceaux.append(f"{mois['films']} FILM{'S' if mois['films'] > 1 else ''}")
+    if mois["episodes"]:
+        morceaux.append(f"{mois['episodes']} ÉP.")
+    return " · ".join(morceaux)
+
+
+def regrouper_series(liste):
+    """Les épisodes d'une même série vus le même jour forment une seule ligne : « THE BEAR · 3 ÉP. »."""
+    lignes, index = [], {}
+    for v in liste:
+        if not v.get("serie"):
+            lignes.append(dict(v))
+            continue
+        cle = (v["jour"], v["serie"])
+        if cle in index:
+            ligne = lignes[index[cle]]
+            ligne["duree"] = (ligne["duree"] or 0) + (v["duree"] or 0)
+            ligne["nb"] += 1
+        else:
+            index[cle] = len(lignes)
+            lignes.append(dict(v, nb=1))
+    for ligne in lignes:
+        if "nb" in ligne:
+            ligne["libelle"] = f"{ligne['titre']} · {ligne['nb']} ÉP."
+    return lignes
+
+
 def liste_films(d, liste, x0, x1, y, s, nb_max, taille=22, reste=True):
     f = police("mono", taille * s)
     fg = police("mono_moyen", taille * s)
     pas = taille * 2.1 * s
-    couleurs = couleurs_mois(liste)
+    couleurs = couleurs_mois(liste)      # mêmes couleurs que dans l'orbe (une par film ou par série)
+    liste = regrouper_series(liste)
     if reste and len(liste) > nb_max:
         nb_max -= 1      # la dernière ligne annonce les films cachés
     for v in liste[-nb_max:]:
@@ -1180,7 +1214,7 @@ def liste_films(d, liste, x0, x1, y, s, nb_max, taille=22, reste=True):
         d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=hexa(couleurs[v["titre"]]))
         duree = duree_txt(v["duree"]).upper() if v["duree"] else ""
         wd = largeur_espace(d, duree, f, 1 * s)
-        titre = tronquer(v["titre"].upper(), fg, x1 - (cx + 26 * s) - wd - 40 * s, d)
+        titre = tronquer(v.get("libelle", v["titre"]).upper(), fg, x1 - (cx + 26 * s) - wd - 40 * s, d)
         espace(d, (cx + 26 * s, y), titre, fg, hexa(ENCRE), 1 * s)
         espace(d, (x1, y), duree, f, hexa(GRIS_P), 1 * s, "rs")
         y += pas
@@ -1313,12 +1347,13 @@ def theme_papier(vus, auj, L, H, stats="", annee=None):
     base = H * 0.33
     d.text((x0 - 6 * s, base), stats or "0 h", font=f_gros, fill=hexa(ENCRE), anchor="ls")
     f_it = police("serif_italique", 46 * s)
-    d.text((x0, base + 62 * s), f"devant des films en {MOIS_FR[auj.month - 1]}", font=f_it,
+    devant = "l'écran" if INCLURE_EPISODES else "des films"
+    d.text((x0, base + 62 * s), f"devant {devant} en {MOIS_FR[auj.month - 1]}", font=f_it,
            fill=hexa("#6B6862"), anchor="ls")
     nb = len(mois["liste"])
     f_p = police("mono_moyen", 24 * s)
     ecart = ecart_txt(mois)
-    pastille(d, x0, base + 104 * s, f"{nb} FILM{'S' if nb > 1 else ''}",
+    pastille(d, x0, base + 104 * s, compte_mois(mois),
              f"{ecart} VS {MOIS_COURT[auj.month - 2]}" if ecart else None, f_p, s)
     y = base + 270 * s
     d.line([(x0, y - 50 * s), (x1, y - 50 * s)], fill=hexa("#BDB9B2"), width=max(1, int(2 * s)))
@@ -1352,9 +1387,9 @@ def iphone_papier(vus, auj, L, H, stats="", annee=None):
     f_p = police("mono_moyen", 26 * s)
     nb = len(mois["liste"])
     ecart = ecart_txt(mois)
-    largeur_p = pastille(d, 0, -1000, f"{nb} FILM{'S' if nb > 1 else ''}",
+    largeur_p = pastille(d, 0, -1000, compte_mois(mois),
                          f"{ecart}" if ecart else None, f_p, s * 1.1) - 0
-    pastille(d, L - marge - largeur_p, base - 70 * s, f"{nb} FILM{'S' if nb > 1 else ''}",
+    pastille(d, L - marge - largeur_p, base - 70 * s, compte_mois(mois),
              f"{ecart}" if ecart else None, f_p, s * 1.1)
     y = liste_films(d, mois["liste"], marge, L - marge, base + 80 * s, s, 3, taille=27)
 
