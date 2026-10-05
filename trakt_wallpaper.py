@@ -20,7 +20,7 @@ from calendar import monthrange
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageMath
 
 # ============ CONFIGURATION ============
 TRAKT_CLIENT_ID = "COLLE_TON_CLIENT_ID_ICI"
@@ -162,12 +162,16 @@ def historique_mois(annee, mois, type_):
 
 
 def charger_mois(annee, mois, type_, auj):
-    """Les mois passés sont gardés en cache : seul le mois en cours est retéléchargé."""
+    """Toujours relu sur Trakt (un film peut être ajouté après coup à un mois passé) ; le cache ne sert qu'en
+    secours, si Trakt ne répond pas."""
     cache = DOSSIER / "cache" / f"{type_}_{annee}-{mois:02d}.json"
     passe = (annee, mois) < (auj.year, auj.month)
-    if passe and cache.exists():
-        return json.loads(cache.read_text())
-    liste = historique_mois(annee, mois, type_)
+    try:
+        liste = historique_mois(annee, mois, type_)
+    except Exception:
+        if cache.exists():
+            return json.loads(cache.read_text())
+        raise
     if passe:
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(liste, ensure_ascii=False))
@@ -257,11 +261,17 @@ def preparer(annee_donnees, auj):
         "minutes_prec": sum(v["duree"] for v in precedent) if precedent is not None else None,
         "serie": serie,
     }
-    # Films de chaque mois de l'année, pour le bandeau du bas
+    # Films de chaque mois de l'année, pour le bandeau du bas (dans l'ordre où ils ont été vus)
     annee["par_mois"] = {
-        m: [{"jour": datetime.fromisoformat(v["quand"]).day, "titre": v["titre"], "duree": v["duree"]}
-            for t in types for v in annee_donnees.get((m, t), [])]
+        m: [{"jour": datetime.fromisoformat(v["quand"]).day, "titre": v["titre"], "duree": v["duree"],
+             "serie": v.get("serie")}
+            for v in sorted((v for t in types for v in annee_donnees.get((m, t), [])), key=lambda v: v["quand"])]
         for m in range(1, auj.month + 1)}
+    # Une couleur par titre pour toute l'année, tirée dans l'ordre des visionnages
+    tous = sorted((v for (m, t), l in annee_donnees.items() if t in types for v in l),
+                  key=lambda v: (datetime.fromisoformat(v["quand"]), v["titre"]))
+    COULEURS.clear()
+    COULEURS.update(couleurs_annee([v["titre"] for v in tous], auj.year))
     return vus, stats, annee
 
 
@@ -1045,52 +1055,146 @@ def iphone_appareil(vus, auj, L, H, stats="", annee=None):
 
 # ---------- Thème 5 : le papier (orbe de couleur, schéma technique) ----------
 
-TEINTES = ["#1F3FD1", "#E8452C", "#F5A623", "#0F8B8D", "#7B3FE4", "#E85D9E", "#3BA55C", "#6FC3E8",
-           "#2C2A6B"]
+# Palette Bauhaus : le cercle chromatique d'Itten (couleurs pures), plus trois couleurs des affiches de l'école.
+TEINTES = ["#F7C61B",  # jaune
+           "#F5A00F",  # jaune-orangé
+           "#EE7517",  # orange
+           "#F04A2E",  # vermillon
+           "#D2232A",  # rouge
+           "#C2257A",  # rouge-violet
+           "#F0648F",  # rose
+           "#7B3FB4",  # violet
+           "#2329A0",  # outremer
+           "#1F5BD1",  # bleu
+           "#3FA9E8",  # bleu ciel
+           "#0C8FA0",  # bleu-vert
+           "#00B48C",  # émeraude
+           "#1B9A4B",  # vert
+           "#9CC21E"]  # jaune-vert
 ENCRE, GRIS_P = "#151515", "#8F8B85"
+OPACITE_TACHES = 0.75      # là où deux taches se croisent, on voit l'une à travers l'autre
+COULEURS = {}              # titre → couleur, pour toute l'année (rempli par preparer)
 
 
-def couleurs_mois(liste):
-    """Une couleur par film, toujours la même pour un titre, sans doublon dans le mois
-    tant qu'il reste des teintes libres."""
-    couleurs, prises = {}, []
-    for v in liste:
-        if v["titre"] in couleurs:
+def hasard(graine):
+    """Générateur mulberry32 : mêmes tirages ici et dans l'encoche (Encoche, OrbColors.swift)."""
+    a = graine & 0xFFFFFFFF
+
+    def suivant():
+        nonlocal a
+        a = (a + 0x6D2B79F5) & 0xFFFFFFFF
+        t = ((a ^ (a >> 15)) * (a | 1)) & 0xFFFFFFFF
+        t = ((t + (((t ^ (t >> 7)) * (t | 61)) & 0xFFFFFFFF)) & 0xFFFFFFFF) ^ t
+        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296
+    return suivant
+
+
+def couleurs_annee(titres, annee):
+    """Les 15 couleurs sont un jeu de cartes mélangé : chaque nouveau titre de l'année (dans l'ordre où il a été
+    vu) tire la suivante et la garde toute l'année. Quand les 15 sont sorties, on rebat le jeu, sans reprendre
+    en premier la dernière couleur sortie."""
+    couleurs, pioche, derniere, tour = {}, [], None, 0
+    for titre in titres:
+        if titre in couleurs:
             continue
-        i = int(hashlib.md5(v["titre"].encode()).hexdigest(), 16) % len(TEINTES)
-        for k in range(len(TEINTES)):
-            if TEINTES[(i + k) % len(TEINTES)] not in prises:
-                i = (i + k) % len(TEINTES)
-                break
-        couleurs[v["titre"]] = TEINTES[i]
-        prises = (prises + [TEINTES[i]])[-(len(TEINTES) - 1):]
+        if not pioche:
+            pioche, suivant = TEINTES[:], hasard(annee * 100 + tour)
+            for i in range(len(pioche) - 1, 0, -1):          # Fisher-Yates
+                j = int(suivant() * (i + 1))
+                pioche[i], pioche[j] = pioche[j], pioche[i]
+            tour += 1
+            if pioche[0] == derniere:
+                pioche.append(pioche.pop(0))
+        couleurs[titre] = derniere = pioche.pop(0)
     return couleurs
 
 
-def orbe(liste, nb_jours, diametre):
-    """Chaque film est une tache de couleur : sa place = le jour, sa taille = la durée."""
-    c = 420
-    toile = Image.new("RGBA", (c, c), hexa("#D6D2CB"))
-    dd = ImageDraw.Draw(toile)
-    couleurs = couleurs_mois(liste)
-    echelle = min(1.0, (5 / max(1, len(liste))) ** 0.3)
-    for i, f in enumerate(sorted(liste, key=lambda f: -f["duree"])):
+def couleurs_mois(liste):
+    """Couleur de chaque titre (celle de l'année)."""
+    manquants = [v["titre"] for v in liste if v["titre"] not in COULEURS]
+    secours = couleurs_annee(manquants, 0) if manquants else {}
+    return {v["titre"]: COULEURS.get(v["titre"]) or secours[v["titre"]] for v in liste}
+
+
+def lisse(a, b, x):
+    t = min(1.0, max(0.0, (x - a) / (b - a)))
+    return t * t * (3 - 2 * t)
+
+
+def taches_orbe(liste, nb_jours, c, t=None):
+    """Les taches de l'orbe : (série ?, rayon, x, y, couleur), sur une toile de côté c.
+    - un épisode compte avec les autres épisodes de sa série vus le même soir (une seule tache) ;
+    - angle = le jour du visionnage, toujours ;
+    - les titres vus à quelques jours d'écart prennent chacun une autre distance au centre (milieu, centre, bord) ;
+    - taille = durée ; t (0 → 1, encoche animée) fait respirer chaque tache le long de la direction de sa date."""
+    groupes, index = [], {}
+    for v in liste:                       # liste chronologique
+        if not v.get("serie"):
+            groupes.append(dict(v))
+            continue
+        cle = (v["jour"], v["serie"])
+        if cle in index:
+            groupes[index[cle]]["duree"] = (groupes[index[cle]]["duree"] or 0) + (v["duree"] or 0)
+        else:
+            index[cle] = len(groupes)
+            groupes.append(dict(v))
+    couleurs = couleurs_mois(groupes)
+    n = len(groupes)
+    echelle = min(1.0, (5 / max(1, n)) ** 0.3)
+    taches, jours = [], []
+    for i, f in enumerate(groupes):
         a = 2 * math.pi * (f["jour"] - 0.5) / nb_jours - math.pi / 2
-        rayon = c * (0.17 if len(liste) <= 6 or i % 2 else 0.08)
-        px, py = c / 2 + rayon * math.cos(a), c / 2 + rayon * math.sin(a)
         r = c * (0.12 + 0.16 * min(1.0, (f["duree"] or 90) / 180)) * echelle
-        dd.ellipse([px - r, py - r, px + r, py + r], fill=hexa(couleurs[f["titre"]]))
-    toile = toile.filter(ImageFilter.GaussianBlur(c * (0.075 if len(liste) <= 6 else 0.05)))
+        k = sum(1 for j in jours if min(abs(j - f["jour"]), nb_jours - abs(j - f["jour"])) <= 4)
+        jours.append(f["jour"])
+        rayon = c * [0.17, 0.07, 0.26][k % 3]
+        if t is not None:
+            phase = (k * 0.5) % 1 + (i * 0.618) % 1 * 0.15
+            rayon += c * 0.035 * math.sin(2 * math.pi * (t + phase))
+            r *= 1 + 0.07 * math.sin(2 * math.pi * (t + phase + 0.25))
+        taches.append((bool(f.get("serie")), r, c / 2 + rayon * math.cos(a), c / 2 + rayon * math.sin(a),
+                       couleurs[f["titre"]]))
+    return taches, n
+
+
+def orbe(liste, nb_jours, diametre):
+    """Chaque film est une tache de couleur : sa place = le jour, sa taille = la durée. Les taches sont peintes
+    nettes (les séries dessous, les grandes d'abord), translucides là où elles se croisent, puis floutées
+    ensemble et posées dans un disque adouci avec un halo, sur fond transparent."""
+    c = 420
+    taches, n = taches_orbe(liste, nb_jours, c)
+    couleur = Image.new("RGB", (c, c), (0, 0, 0))
+    couverture = Image.new("L", (c, c), 0)
+    for _, r, x, y, col in sorted(taches, key=lambda v: (not v[0], -v[1])):
+        m = Image.new("L", (c, c), 0)
+        ImageDraw.Draw(m).ellipse([x - r, y - r, x + r, y + r], fill=255)
+        # Pleine là où elle est seule ; translucide seulement là où elle passe sur une autre couleur
+        part = ImageChops.multiply(m, ImageChops.invert(couverture).point(
+            lambda v: int(255 * (OPACITE_TACHES + (1 - OPACITE_TACHES) * v / 255))))
+        couleur = Image.composite(Image.new("RGB", (c, c), hexa(col)[:3]), couleur, part)
+        couverture = ImageChops.lighter(couverture, m)
+
+    def flou(rayon):
+        """Flou en couleurs prémultipliées (aucun liseré sombre au bord des taches)."""
+        pre = ImageChops.multiply(couleur, Image.merge("RGB", [couverture] * 3)).filter(ImageFilter.GaussianBlur(rayon))
+        cov = couverture.filter(ImageFilter.GaussianBlur(rayon))
+        canaux = [ImageMath.lambda_eval(lambda e: e["min"](e["p"] * 255 / (e["c"] + 0.5), 255),
+                                        p=canal.convert("F"), c=cov.convert("F")).convert("L") for canal in pre.split()]
+        return Image.merge("RGB", canaux), cov
+
+    f = 0.075 + (0.05 - 0.075) * lisse(6, 10, n)
     masque = Image.new("L", (c, c), 0)
     ImageDraw.Draw(masque).ellipse([c * 0.15, c * 0.15, c * 0.85, c * 0.85], fill=255)
     masque = masque.filter(ImageFilter.GaussianBlur(c * 0.03))
     halo = masque.filter(ImageFilter.GaussianBlur(c * 0.07)).point(lambda v: int(v * 0.45))
-    sortie = Image.new("RGBA", (c, c), (0, 0, 0, 0))
-    flou = toile.filter(ImageFilter.GaussianBlur(c * 0.06))
-    flou.putalpha(halo)
-    sortie = Image.alpha_composite(sortie, flou)
-    toile.putalpha(masque)
-    sortie = Image.alpha_composite(sortie, toile)
+    disque_c, disque_a = flou(c * f)
+    halo_c, halo_a = flou(c * (f + 0.06))
+    disque = disque_c.convert("RGBA")
+    disque.putalpha(ImageChops.multiply(disque_a, masque))
+    autour = halo_c.convert("RGBA")
+    autour.putalpha(ImageChops.multiply(halo_a, halo))
+    sortie = Image.alpha_composite(Image.new("RGBA", (c, c), (0, 0, 0, 0)), autour)
+    sortie = Image.alpha_composite(sortie, disque)
     return sortie.resize((int(diametre), int(diametre)), Image.BICUBIC)
 
 
